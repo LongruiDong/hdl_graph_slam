@@ -55,7 +55,6 @@
 #include <g2o/edge_se3_priorvec.hpp>
 #include <g2o/edge_se3_priorquat.hpp>
 
-
 namespace hdl_graph_slam {
 
 class HdlGraphSlamNodelet : public nodelet::Nodelet {
@@ -119,12 +118,13 @@ public:
     // publishers
     markers_pub = mt_nh.advertise<visualization_msgs::MarkerArray>("/hdl_graph_slam/markers", 16);
     odom2map_pub = mt_nh.advertise<geometry_msgs::TransformStamped>("/hdl_graph_slam/odom2pub", 16);
-    map_points_pub = mt_nh.advertise<sensor_msgs::PointCloud2>("/hdl_graph_slam/map_points", 1);
+    map_points_pub = mt_nh.advertise<sensor_msgs::PointCloud2>("/hdl_graph_slam/map_points", 1, true);
     read_until_pub = mt_nh.advertise<std_msgs::Header>("/hdl_graph_slam/read_until", 32);
 
     dump_service_server = mt_nh.advertiseService("/hdl_graph_slam/dump", &HdlGraphSlamNodelet::dump_service, this);
     save_map_service_server = mt_nh.advertiseService("/hdl_graph_slam/save_map", &HdlGraphSlamNodelet::save_map_service, this);
 
+    graph_updated = false;
     double graph_update_interval = private_nh.param<double>("graph_update_interval", 3.0);
     double map_cloud_update_interval = private_nh.param<double>("map_cloud_update_interval", 10.0);
     optimization_timer = mt_nh.createWallTimer(ros::WallDuration(graph_update_interval), &HdlGraphSlamNodelet::optimization_timer_callback, this);
@@ -184,7 +184,7 @@ private:
     trans_odom2map_mutex.unlock();
 
     int num_processed = 0;
-    for(int i=0; i<std::min<int>(keyframe_queue.size(), max_keyframes_per_update); i++) {
+    for(int i = 0; i < std::min<int>(keyframe_queue.size(), max_keyframes_per_update); i++) {
       num_processed = i;
 
       const auto& keyframe = keyframe_queue[i];
@@ -199,13 +199,21 @@ private:
       // fix the first node
       if(keyframes.empty() && new_keyframes.size() == 1) {
         if(private_nh.param<bool>("fix_first_node", false)) {
+          Eigen::MatrixXd inf = Eigen::MatrixXd::Identity(6, 6);
+          std::stringstream sst(private_nh.param<std::string>("fix_first_node_stddev", "1 1 1 1 1 1"));
+          for(int i = 0; i < 6; i++) {
+            double stddev = 1.0;
+            sst >> stddev;
+            inf(i, i) = 1.0 / stddev;
+          }
+
           anchor_node = graph_slam->add_se3_node(Eigen::Isometry3d::Identity());
           anchor_node->setFixed(true);
-          anchor_edge = graph_slam->add_se3_edge(anchor_node, keyframe->node, Eigen::Isometry3d::Identity(), Eigen::MatrixXd::Identity(6, 6));
+          anchor_edge = graph_slam->add_se3_edge(anchor_node, keyframe->node, Eigen::Isometry3d::Identity(), inf);
         }
       }
 
-      if(i==0 && keyframes.empty()) {
+      if(i == 0 && keyframes.empty()) {
         continue;
       }
 
@@ -319,7 +327,7 @@ private:
       keyframe->utm_coord = xyz;
 
       g2o::OptimizableGraph::Edge* edge;
-      if(std::isnan(xyz.z())){
+      if(std::isnan(xyz.z())) {
         Eigen::Matrix2d information_matrix = Eigen::Matrix2d::Identity() / gps_edge_stddev_xy;
         edge = graph_slam->add_se3_prior_xy_edge(keyframe->node, xyz.head<2>(), information_matrix);
       } else {
@@ -333,11 +341,7 @@ private:
       updated = true;
     }
 
-    auto remove_loc = std::upper_bound(gps_queue.begin(), gps_queue.end(), keyframes.back()->stamp,
-      [=](const ros::Time& stamp, const geographic_msgs::GeoPointStampedConstPtr& geopoint) {
-        return stamp < geopoint->header.stamp;
-      }
-    );
+    auto remove_loc = std::upper_bound(gps_queue.begin(), gps_queue.end(), keyframes.back()->stamp, [=](const ros::Time& stamp, const geographic_msgs::GeoPointStampedConstPtr& geopoint) { return stamp < geopoint->header.stamp; });
     gps_queue.erase(gps_queue.begin(), remove_loc);
     return updated;
   }
@@ -403,7 +407,7 @@ private:
       try {
         tf_listener.transformVector(base_frame_id, acc_imu, acc_base);
         tf_listener.transformQuaternion(base_frame_id, quat_imu, quat_base);
-      } catch (std::exception& e) {
+      } catch(std::exception& e) {
         std::cerr << "failed to find transform!!" << std::endl;
         return false;
       }
@@ -429,16 +433,11 @@ private:
       updated = true;
     }
 
-    auto remove_loc = std::upper_bound(imu_queue.begin(), imu_queue.end(), keyframes.back()->stamp,
-      [=](const ros::Time& stamp, const sensor_msgs::ImuConstPtr& imu) {
-        return stamp < imu->header.stamp;
-      }
-    );
+    auto remove_loc = std::upper_bound(imu_queue.begin(), imu_queue.end(), keyframes.back()->stamp, [=](const ros::Time& stamp, const sensor_msgs::ImuConstPtr& imu) { return stamp < imu->header.stamp; });
     imu_queue.erase(imu_queue.begin(), remove_loc);
 
     return true;
   }
-
 
   /**
    * @brief received floor coefficients are added to #floor_coeffs_queue
@@ -494,11 +493,7 @@ private:
       updated = true;
     }
 
-    auto remove_loc = std::upper_bound(floor_coeffs_queue.begin(), floor_coeffs_queue.end(), latest_keyframe_stamp,
-      [=](const ros::Time& stamp, const hdl_graph_slam::FloorCoeffsConstPtr& coeffs) {
-        return stamp < coeffs->header.stamp;
-      }
-    );
+    auto remove_loc = std::upper_bound(floor_coeffs_queue.begin(), floor_coeffs_queue.end(), latest_keyframe_stamp, [=](const ros::Time& stamp, const hdl_graph_slam::FloorCoeffsConstPtr& coeffs) { return stamp < coeffs->header.stamp; });
     floor_coeffs_queue.erase(floor_coeffs_queue.begin(), remove_loc);
 
     return updated;
@@ -509,7 +504,7 @@ private:
    * @param event
    */
   void map_points_publish_timer_callback(const ros::WallTimerEvent& event) {
-    if(!map_points_pub.getNumSubscribers()) {
+    if(!map_points_pub.getNumSubscribers() || !graph_updated) {
       return;
     }
 
@@ -552,7 +547,7 @@ private:
       read_until_pub.publish(read_until);
     }
 
-    if(!keyframe_updated & !flush_floor_queue() & !flush_gps_queue() &!flush_imu_queue()) {
+    if(!keyframe_updated & !flush_floor_queue() & !flush_gps_queue() & !flush_imu_queue()) {
       return;
     }
 
@@ -568,6 +563,13 @@ private:
     std::copy(new_keyframes.begin(), new_keyframes.end(), std::back_inserter(keyframes));
     new_keyframes.clear();
 
+    // move the first node anchor position to the current estimate of the first node pose
+    // so the first node moves freely while trying to stay around the origin
+    if(anchor_node && private_nh.param<bool>("fix_first_node_adaptive", true)) {
+      Eigen::Isometry3d anchor_target = static_cast<g2o::VertexSE3*>(anchor_edge->vertices()[1])->estimate();
+      anchor_node->setEstimate(anchor_target);
+    }
+
     // optimize the pose graph
     int num_iterations = private_nh.param<int>("g2o_solver_num_iterations", 1024);
     graph_slam->optimize(num_iterations);
@@ -580,14 +582,12 @@ private:
     trans_odom2map_mutex.unlock();
 
     std::vector<KeyFrameSnapshot::Ptr> snapshot(keyframes.size());
-    std::transform(keyframes.begin(), keyframes.end(), snapshot.begin(),
-      [=](const KeyFrame::Ptr& k) {
-        return std::make_shared<KeyFrameSnapshot>(k);
-    });
+    std::transform(keyframes.begin(), keyframes.end(), snapshot.begin(), [=](const KeyFrame::Ptr& k) { return std::make_shared<KeyFrameSnapshot>(k); });
 
     keyframes_snapshot_mutex.lock();
     keyframes_snapshot.swap(snapshot);
     keyframes_snapshot_mutex.unlock();
+    graph_updated = true;
 
     if(odom2map_pub.getNumSubscribers()) {
       geometry_msgs::TransformStamped ts = matrix2transform(keyframe->stamp, trans.matrix().cast<float>(), map_frame_id, odom_frame_id);
@@ -631,7 +631,7 @@ private:
 
     traj_marker.points.resize(keyframes.size());
     traj_marker.colors.resize(keyframes.size());
-    for(int i=0; i<keyframes.size(); i++) {
+    for(int i = 0; i < keyframes.size(); i++) {
       Eigen::Vector3d pos = keyframes[i]->node->estimate().translation();
       traj_marker.points[i].x = pos.x();
       traj_marker.points[i].y = pos.y();
@@ -676,7 +676,7 @@ private:
     edge_marker.colors.resize(graph_slam->graph->edges().size() * 2);
 
     auto edge_itr = graph_slam->graph->edges().begin();
-    for(int i=0; edge_itr != graph_slam->graph->edges().end(); edge_itr++, i++) {
+    for(int i = 0; edge_itr != graph_slam->graph->edges().end(); edge_itr++, i++) {
       g2o::HyperGraph::Edge* edge = *edge_itr;
       g2o::EdgeSE3* edge_se3 = dynamic_cast<g2o::EdgeSE3*>(edge);
       if(edge_se3) {
@@ -685,25 +685,25 @@ private:
         Eigen::Vector3d pt1 = v1->estimate().translation();
         Eigen::Vector3d pt2 = v2->estimate().translation();
 
-        edge_marker.points[i*2].x = pt1.x();
-        edge_marker.points[i*2].y = pt1.y();
-        edge_marker.points[i*2].z = pt1.z();
-        edge_marker.points[i*2 + 1].x = pt2.x();
-        edge_marker.points[i*2 + 1].y = pt2.y();
-        edge_marker.points[i*2 + 1].z = pt2.z();
+        edge_marker.points[i * 2].x = pt1.x();
+        edge_marker.points[i * 2].y = pt1.y();
+        edge_marker.points[i * 2].z = pt1.z();
+        edge_marker.points[i * 2 + 1].x = pt2.x();
+        edge_marker.points[i * 2 + 1].y = pt2.y();
+        edge_marker.points[i * 2 + 1].z = pt2.z();
 
         double p1 = static_cast<double>(v1->id()) / graph_slam->graph->vertices().size();
         double p2 = static_cast<double>(v2->id()) / graph_slam->graph->vertices().size();
-        edge_marker.colors[i*2].r = 1.0 - p1;
-        edge_marker.colors[i*2].g = p1;
-        edge_marker.colors[i*2].a = 1.0;
-        edge_marker.colors[i*2 + 1].r = 1.0 - p2;
-        edge_marker.colors[i*2 + 1].g = p2;
-        edge_marker.colors[i*2 + 1].a = 1.0;
+        edge_marker.colors[i * 2].r = 1.0 - p1;
+        edge_marker.colors[i * 2].g = p1;
+        edge_marker.colors[i * 2].a = 1.0;
+        edge_marker.colors[i * 2 + 1].r = 1.0 - p2;
+        edge_marker.colors[i * 2 + 1].g = p2;
+        edge_marker.colors[i * 2 + 1].a = 1.0;
 
         if(std::abs(v1->id() - v2->id()) > 2) {
-          edge_marker.points[i*2].z += 0.5;
-          edge_marker.points[i*2 + 1].z += 0.5;
+          edge_marker.points[i * 2].z += 0.5;
+          edge_marker.points[i * 2 + 1].z += 0.5;
         }
 
         continue;
@@ -715,17 +715,17 @@ private:
         Eigen::Vector3d pt1 = v1->estimate().translation();
         Eigen::Vector3d pt2(pt1.x(), pt1.y(), 0.0);
 
-        edge_marker.points[i*2].x = pt1.x();
-        edge_marker.points[i*2].y = pt1.y();
-        edge_marker.points[i*2].z = pt1.z();
-        edge_marker.points[i*2 + 1].x = pt2.x();
-        edge_marker.points[i*2 + 1].y = pt2.y();
-        edge_marker.points[i*2 + 1].z = pt2.z();
+        edge_marker.points[i * 2].x = pt1.x();
+        edge_marker.points[i * 2].y = pt1.y();
+        edge_marker.points[i * 2].z = pt1.z();
+        edge_marker.points[i * 2 + 1].x = pt2.x();
+        edge_marker.points[i * 2 + 1].y = pt2.y();
+        edge_marker.points[i * 2 + 1].z = pt2.z();
 
-        edge_marker.colors[i*2].b = 1.0;
-        edge_marker.colors[i*2].a = 1.0;
-        edge_marker.colors[i*2 + 1].b = 1.0;
-        edge_marker.colors[i*2 + 1].a = 1.0;
+        edge_marker.colors[i * 2].b = 1.0;
+        edge_marker.colors[i * 2].a = 1.0;
+        edge_marker.colors[i * 2 + 1].b = 1.0;
+        edge_marker.colors[i * 2 + 1].a = 1.0;
 
         continue;
       }
@@ -737,17 +737,17 @@ private:
         Eigen::Vector3d pt2 = Eigen::Vector3d::Zero();
         pt2.head<2>() = edge_priori_xy->measurement();
 
-        edge_marker.points[i*2].x = pt1.x();
-        edge_marker.points[i*2].y = pt1.y();
-        edge_marker.points[i*2].z = pt1.z() + 0.5;
-        edge_marker.points[i*2 + 1].x = pt2.x();
-        edge_marker.points[i*2 + 1].y = pt2.y();
-        edge_marker.points[i*2 + 1].z = pt2.z() + 0.5;
+        edge_marker.points[i * 2].x = pt1.x();
+        edge_marker.points[i * 2].y = pt1.y();
+        edge_marker.points[i * 2].z = pt1.z() + 0.5;
+        edge_marker.points[i * 2 + 1].x = pt2.x();
+        edge_marker.points[i * 2 + 1].y = pt2.y();
+        edge_marker.points[i * 2 + 1].z = pt2.z() + 0.5;
 
-        edge_marker.colors[i*2].r = 1.0;
-        edge_marker.colors[i*2].a = 1.0;
-        edge_marker.colors[i*2 + 1].r = 1.0;
-        edge_marker.colors[i*2 + 1].a = 1.0;
+        edge_marker.colors[i * 2].r = 1.0;
+        edge_marker.colors[i * 2].a = 1.0;
+        edge_marker.colors[i * 2 + 1].r = 1.0;
+        edge_marker.colors[i * 2 + 1].a = 1.0;
 
         continue;
       }
@@ -758,17 +758,17 @@ private:
         Eigen::Vector3d pt1 = v1->estimate().translation();
         Eigen::Vector3d pt2 = edge_priori_xyz->measurement();
 
-        edge_marker.points[i*2].x = pt1.x();
-        edge_marker.points[i*2].y = pt1.y();
-        edge_marker.points[i*2].z = pt1.z() + 0.5;
-        edge_marker.points[i*2 + 1].x = pt2.x();
-        edge_marker.points[i*2 + 1].y = pt2.y();
-        edge_marker.points[i*2 + 1].z = pt2.z();
+        edge_marker.points[i * 2].x = pt1.x();
+        edge_marker.points[i * 2].y = pt1.y();
+        edge_marker.points[i * 2].z = pt1.z() + 0.5;
+        edge_marker.points[i * 2 + 1].x = pt2.x();
+        edge_marker.points[i * 2 + 1].y = pt2.y();
+        edge_marker.points[i * 2 + 1].z = pt2.z();
 
-        edge_marker.colors[i*2].r = 1.0;
-        edge_marker.colors[i*2].a = 1.0;
-        edge_marker.colors[i*2 + 1].r = 1.0;
-        edge_marker.colors[i*2 + 1].a = 1.0;
+        edge_marker.colors[i * 2].r = 1.0;
+        edge_marker.colors[i * 2].a = 1.0;
+        edge_marker.colors[i * 2 + 1].r = 1.0;
+        edge_marker.colors[i * 2 + 1].a = 1.0;
 
         continue;
       }
@@ -825,7 +825,7 @@ private:
     std::cout << "all data dumped to:" << directory << std::endl;
 
     graph_slam->save(directory + "/graph.g2o");
-    for(int i=0; i<keyframes.size(); i++) {
+    for(int i = 0; i < keyframes.size(); i++) {
       std::stringstream sst;
       sst << boost::format("%s/%06d") % directory % i;
 
@@ -884,6 +884,7 @@ private:
 
     return true;
   }
+
 private:
   // ROS
   ros::NodeHandle nh;
@@ -949,6 +950,7 @@ private:
   std::deque<hdl_graph_slam::FloorCoeffsConstPtr> floor_coeffs_queue;
 
   // for map cloud generation
+  std::atomic_bool graph_updated;
   double map_cloud_resolution;
   std::mutex keyframes_snapshot_mutex;
   std::vector<KeyFrameSnapshot::Ptr> keyframes_snapshot;
@@ -975,6 +977,6 @@ private:
   std::unique_ptr<InformationMatrixCalculator> inf_calclator;
 };
 
-}
+}  // namespace hdl_graph_slam
 
 PLUGINLIB_EXPORT_CLASS(hdl_graph_slam::HdlGraphSlamNodelet, nodelet::Nodelet)
